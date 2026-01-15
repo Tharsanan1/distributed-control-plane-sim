@@ -1,5 +1,7 @@
 # Distributed Control Plane Simulator
 
+[**View Live Simulation**](https://tharsanan1.github.io/distributed-control-plane-sim/)
+
 A sophisticated interactive visualization of a **High-Availability Distributed Control Plane**. This simulation demonstrates advanced concepts in distributed systems, specifically focusing on **Leader Election**, **Partition Tolerance**, and **State Reconciliation** in a cloud-native environment.
 
 ## 🧠 Core Strategy: Connectivity-Aware Leader Election
