@@ -1,0 +1,910 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <title>Distributed Control Plane Simulator (Physical Probes)</title>
+    <style>
+        body {
+            margin: 0;
+            overflow: hidden;
+            background-color: #0b0b15;
+            font-family: 'Segoe UI', monospace;
+            color: white;
+        }
+
+        canvas {
+            display: block;
+        }
+
+        #ui-layer {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            pointer-events: none;
+        }
+
+        .panel {
+            position: absolute;
+            pointer-events: auto;
+            background: rgba(16, 16, 32, 0.95);
+            border: 1px solid #444;
+            border-radius: 8px;
+            backdrop-filter: blur(5px);
+            padding: 15px;
+            box-shadow: 0 4px 15px rgba(0, 0, 0, 0.5);
+        }
+
+        #api-panel {
+            top: 20px;
+            left: 20px;
+            width: 280px;
+            z-index: 10;
+        }
+
+        #controls {
+            top: 20px;
+            right: 20px;
+            width: 320px;
+            z-index: 10;
+        }
+
+        #logs {
+            position: absolute;
+            bottom: 10px;
+            left: 50%;
+            transform: translateX(-50%);
+            width: 70%;
+            height: 120px;
+            border: 1px solid #444;
+            border-radius: 8px;
+            overflow-y: auto;
+            background: rgba(0, 0, 0, 0.85);
+            font-size: 12px;
+            padding: 10px;
+            pointer-events: auto;
+        }
+
+        h3 {
+            margin: 0 0 10px 0;
+            color: #4cc9f0;
+            border-bottom: 1px solid #333;
+            padding-bottom: 5px;
+            font-size: 1.1rem;
+        }
+
+        .btn-group {
+            display: flex;
+            gap: 5px;
+            margin-top: 5px;
+        }
+
+        button {
+            background: #0f3460;
+            color: white;
+            border: 1px solid #4cc9f0;
+            padding: 8px;
+            width: 100%;
+            cursor: pointer;
+            border-radius: 4px;
+            font-family: inherit;
+            transition: all 0.2s;
+        }
+
+        button:hover:not(:disabled) {
+            background: #4cc9f0;
+            color: black;
+        }
+
+        button:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+            border-color: #555;
+            background: #222;
+        }
+
+        button.deploy {
+            background: #1b5e20;
+            border-color: #2e7d32;
+        }
+
+        button.deploy:hover:not(:disabled) {
+            background: #2ecc71;
+        }
+
+        button.undeploy {
+            background: #b71c1c;
+            border-color: #c62828;
+        }
+
+        button.undeploy:hover:not(:disabled) {
+            background: #e74c3c;
+        }
+
+        button.update {
+            background: #f57f17;
+            border-color: #f9a825;
+        }
+
+        button.update:hover:not(:disabled) {
+            background: #f1c40f;
+        }
+
+        .slider-container {
+            margin: 10px 0;
+        }
+
+        label {
+            display: block;
+            font-size: 0.8rem;
+            color: #aaa;
+            margin-bottom: 5px;
+        }
+
+        input[type=range] {
+            width: 100%;
+        }
+
+        .log-entry {
+            margin-bottom: 2px;
+            font-family: 'Consolas', monospace;
+            border-bottom: 1px solid #222;
+            padding-bottom: 2px;
+        }
+
+        .log-success {
+            color: #2ecc71;
+        }
+
+        .log-error {
+            color: #e74c3c;
+        }
+
+        .log-info {
+            color: #3498db;
+        }
+
+        .log-warn {
+            color: #f1c40f;
+        }
+    </style>
+</head>
+
+<body>
+
+    <canvas id="simCanvas"></canvas>
+
+    <div id="ui-layer">
+        <div class="panel" id="api-panel">
+            <h3>API Control</h3>
+            <div id="api-card-container"></div>
+        </div>
+
+        <div class="panel" id="controls">
+            <h3>Simulation Control</h3>
+            <div class="slider-container">
+                <label>Simulation Speed: <span id="speed-val">1.0x</span></label>
+                <input type="range" min="0.1" max="3.0" step="0.1" value="1.0" oninput="sim.setSpeed(this.value)">
+            </div>
+            <div style="font-size: 0.8rem; color: #ccc; line-height: 1.4;">
+                <strong>Test Readiness Probe (Blue Dot):</strong><br>
+                1. <b>Left Click</b> the line between API-02 and LB.<br>
+                2. <b>Right Click</b> the current Leader (API-01) to KILL it.<br>
+                3. Watch API-02's blue probe hit the cut and fail.<br>
+                4. API-03's probe succeeds -> Sends Orange Lock -> Wins.
+            </div>
+
+            <h3>Cluster Scaling</h3>
+            <div class="slider-container">
+                <label>API Servers</label>
+                <div class="btn-group">
+                    <button onclick="sim.addServer()">+ Add</button>
+                    <button onclick="sim.removeServer()">- Remove</button>
+                </div>
+            </div>
+            <div class="slider-container">
+                <label>Gateways</label>
+                <div class="btn-group">
+                    <button onclick="sim.addGateway()">+ Add</button>
+                    <button onclick="sim.removeGateway()">- Remove</button>
+                </div>
+            </div>
+        </div>
+
+        <div id="logs"></div>
+    </div>
+
+    <script>
+        /**
+         * DISTRIBUTED SYSTEM GAME ENGINE v5
+         * Feature: Physical Readiness Probes (Blue Packets)
+         */
+
+        // --- UTILS ---
+        const V2 = (x, y) => ({ x, y });
+        const Dist = (v1, v2) => Math.sqrt(Math.pow(v2.x - v1.x, 2) + Math.pow(v2.y - v1.y, 2));
+        const Lerp = (start, end, t) => start * (1 - t) + end * t;
+
+        // --- CONFIG ---
+        const COLORS = {
+            bg: '#0b0b15',
+            line: '#333',
+            lineActive: '#4cc9f0',
+            lineCut: '#ff3333',
+            server: '#0f3460',
+            db: '#16213e',
+            gateway: '#533b63',
+            lb: '#2c3e50',
+            packet: '#fff',
+            probe: '#00ffff', // Cyan for Probe
+            lock: '#f1c40f',
+            dead: '#333'
+        };
+
+        class Particle {
+            constructor(x, y, color, velocity) {
+                this.x = x; this.y = y; this.color = color;
+                this.vx = velocity.x; this.vy = velocity.y;
+                this.life = 1.0; this.decay = 0.02 + Math.random() * 0.03;
+            }
+            update() { this.x += this.vx; this.y += this.vy; this.life -= this.decay; }
+            draw(ctx) {
+                ctx.globalAlpha = Math.max(0, this.life);
+                ctx.fillStyle = this.color;
+                ctx.beginPath(); ctx.arc(this.x, this.y, 3, 0, Math.PI * 2); ctx.fill();
+                ctx.globalAlpha = 1;
+            }
+        }
+
+        class Ripple {
+            constructor(x, y, color) {
+                this.x = x; this.y = y; this.color = color;
+                this.radius = 20; this.alpha = 1.0;
+            }
+            update() { this.radius += 4; this.alpha -= 0.02; } // Faster expansion, longer life
+            draw(ctx) {
+                if (this.alpha <= 0) return;
+                ctx.save();
+                ctx.strokeStyle = this.color;
+                ctx.lineWidth = 4; // Thicker line
+                ctx.globalAlpha = this.alpha;
+                ctx.beginPath(); ctx.arc(this.x, this.y, this.radius, 0, Math.PI * 2); ctx.stroke();
+                ctx.restore();
+            }
+        }
+
+        class Pipe {
+            constructor(n1, n2) {
+                this.n1 = n1; this.n2 = n2;
+                this.offset = 0;
+            }
+            update(dt) {
+                if (this.n1.state === 'dead' || this.n2.state === 'dead') return false; // Pipe broken
+                this.offset -= 2 * dt;
+                return true;
+            }
+            draw(ctx) {
+                ctx.save();
+                ctx.strokeStyle = '#4cc9f0';
+                ctx.lineWidth = 4;
+                ctx.globalAlpha = 0.4;
+                ctx.setLineDash([10, 10]);
+                ctx.lineDashOffset = this.offset;
+                ctx.beginPath();
+                ctx.moveTo(this.n1.x, this.n1.y);
+                ctx.lineTo(this.n2.x, this.n2.y);
+                ctx.stroke();
+                ctx.restore();
+            }
+        }
+
+        class Packet {
+            constructor(fromNode, toNode, type, color, onArrive, onFail) {
+                this.from = fromNode; this.to = toNode; this.type = type; this.color = color;
+                this.onArrive = onArrive;
+                this.onFail = onFail;
+                this.progress = 0; this.speed = 0.015; this.isDead = false;
+
+                // Trash physics
+                this.isTrash = false;
+                this.trashVelocity = { x: 0, y: 0 };
+                this.spin = 0; this.angle = 0; // ROTATION
+                this.pos = { x: fromNode.x, y: fromNode.y };
+            }
+
+            update(dt, sim) {
+                if (this.isTrash) {
+                    this.pos.x += this.trashVelocity.x * dt;
+                    this.pos.y += this.trashVelocity.y * dt;
+                    this.trashVelocity.y += 0.8 * dt; // Heavier gravity
+                    this.angle += this.spin; // SPIN
+                    if (this.pos.y > window.innerHeight + 50) this.isDead = true;
+                    return;
+                }
+
+                // PHYSICAL CUT CHECK
+                const link = sim.getLink(this.from, this.to);
+                // Only check cut logic if we are moving (0.1 to 0.9) to avoid spawn-kills
+                if (link && link.cut && this.progress > 0.1 && this.progress < 0.9) {
+                    sim.spawnExplosion(this.pos.x, this.pos.y, '#ff3333');
+                    this.isDead = true;
+
+                    // If this was a PROBE, log specifically
+                    if (this.type === 'PROBE') {
+                        sim.log(`${this.from.label}: Probe Failed (Link Cut). Stopping Election.`, 'error');
+                    } else {
+                        sim.log(`Packet dropped: Partition`, 'error');
+                        if (this.onFail) this.onFail(sim);
+                    }
+                    return;
+                }
+
+                this.progress += this.speed * dt;
+                this.pos.x = Lerp(this.from.x, this.to.x, this.progress);
+                this.pos.y = Lerp(this.from.y, this.to.y, this.progress);
+
+                if (this.progress >= 1) {
+                    this.isDead = true;
+                    if (this.to.state === 'dead') {
+                        sim.spawnExplosion(this.to.x, this.to.y, '#ff3333');
+                        if (this.type !== 'LOCK') sim.log(`Connection Refused: ${this.to.label} is DEAD`, 'error');
+                        if (this.onFail) this.onFail(sim);
+                    } else {
+                        this.onArrive(sim);
+                    }
+                }
+            }
+
+            draw(ctx) {
+                if (this.isTrash) {
+                    ctx.save();
+                    ctx.translate(this.pos.x, this.pos.y);
+                    ctx.rotate(this.angle);
+                    ctx.fillStyle = '#ff3333';
+                    ctx.font = 'bold 40px Arial'; // Visual: Larger Icon
+                    ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+                    ctx.fillText("✖", 0, 0);
+                    ctx.restore();
+                    return;
+                }
+
+                ctx.fillStyle = this.color;
+                ctx.shadowBlur = 10; ctx.shadowColor = this.color;
+                ctx.beginPath(); ctx.arc(this.pos.x, this.pos.y, 4, 0, Math.PI * 2); ctx.fill();
+                ctx.shadowBlur = 0;
+            }
+
+            makeTrash() {
+                this.isTrash = true;
+                this.trashVelocity = { x: (Math.random() - 0.5) * 15, y: -12 - Math.random() * 8 };
+                this.spin = (Math.random() - 0.5) * 0.4;
+            }
+        }
+
+        class Node {
+            constructor(id, label, x, y, type) {
+                this.id = id; this.label = label; this.x = x; this.y = y; this.type = type;
+                this.state = 'idle';
+                this.radius = type === 'db' ? 40 : (type === 'lb' ? 25 : 30);
+                this.color = COLORS[type] || '#fff';
+                this.leaseTime = 0;
+                this.dbText = "";
+                this.pulse = 0;
+            }
+
+            draw(ctx) {
+                let drawColor = this.state === 'dead' ? COLORS.dead : this.color;
+                if (this.state === 'leader') drawColor = COLORS.lock;
+
+                ctx.shadowBlur = this.state === 'leader' ? 20 : 10;
+                ctx.shadowColor = drawColor;
+                ctx.fillStyle = drawColor;
+                ctx.beginPath();
+
+                if (this.type === 'db') {
+                    ctx.ellipse(this.x, this.y, this.radius, this.radius * 0.7, 0, 0, Math.PI * 2);
+                    ctx.fill();
+                    ctx.strokeStyle = '#fff'; ctx.lineWidth = 1; ctx.beginPath();
+                    ctx.ellipse(this.x, this.y - 10, this.radius, this.radius * 0.7, 0, Math.PI, 0); ctx.stroke();
+                } else if (this.type === 'server' || this.type === 'gateway') {
+                    const size = this.radius;
+                    ctx.moveTo(this.x + size, this.y);
+                    for (let i = 1; i <= 6; i++) ctx.lineTo(this.x + size * Math.cos(i * 2 * Math.PI / 6), this.y + size * Math.sin(i * 2 * Math.PI / 6));
+                    ctx.fill();
+
+                    // Watcher Ring (Visualizing Polling/Probing)
+                    if (this.type === 'server' && this.state === 'idle') {
+                        ctx.strokeStyle = '#444'; ctx.lineWidth = 1; ctx.beginPath();
+                        ctx.arc(this.x, this.y, this.radius + 5 + Math.sin(this.pulse) * 2, 0, Math.PI * 2); ctx.stroke();
+                    }
+                } else {
+                    ctx.arc(this.x, this.y, this.radius, 0, Math.PI * 2); ctx.fill();
+                }
+
+                ctx.shadowBlur = 0;
+
+                ctx.fillStyle = '#fff'; ctx.textAlign = 'center'; ctx.font = '10px monospace';
+                ctx.fillText(this.label, this.x, this.y + this.radius + 15);
+
+                if (this.state === 'dead') {
+                    ctx.fillStyle = 'red'; ctx.fillText("💀 DEAD", this.x, this.y - this.radius - 10);
+                } else if (this.state === 'leader') {
+                    ctx.fillStyle = COLORS.lock; ctx.fillText("👑 LEADER", this.x, this.y - this.radius - 10);
+                }
+
+                if (this.type === 'db' && this.dbText) {
+                    ctx.fillStyle = '#4cc9f0'; ctx.font = 'bold 11px monospace';
+                    ctx.fillText(`[${this.dbText}]`, this.x, this.y + 5);
+                }
+
+                if (this.type === 'db' && this.leaseTime > 0) {
+                    ctx.fillStyle = COLORS.lock; ctx.font = 'bold 12px monospace';
+                    ctx.fillText(`LEASE: ${(this.leaseTime / 60).toFixed(1)}s`, this.x, this.y - 15);
+                }
+            }
+
+            update(dt) {
+                if (this.leaseTime > 0) {
+                    this.leaseTime -= dt;
+                    if (this.leaseTime <= 0) this.leaseTime = 0;
+                }
+                this.pulse += 0.1 * dt;
+            }
+        }
+
+        class Simulation {
+            constructor() {
+                this.canvas = document.getElementById('simCanvas');
+                this.ctx = this.canvas.getContext('2d');
+                this.nodes = [];
+                this.links = [];
+                this.packets = [];
+                this.particles = [];
+                this.ripples = []; // NEW
+                this.pipes = []; // WS Pipes
+                this.speedFactor = 1.0;
+
+                this.dbState = { status: 'undeployed', lockedBy: null };
+                this.gwDbState = { status: 'undeployed' };
+
+                this.apiRequests = 0;
+
+                this.resize();
+                window.addEventListener('resize', () => this.resize());
+                this.canvas.addEventListener('mousedown', e => this.handleClick(e));
+                this.canvas.addEventListener('contextmenu', e => { e.preventDefault(); this.handleRightClick(e); });
+
+                this.initWorld();
+                this.loop();
+            }
+
+            resize() { this.canvas.width = window.innerWidth; this.canvas.height = window.innerHeight; }
+            setSpeed(val) { this.speedFactor = parseFloat(val); document.getElementById('speed-val').innerText = val + "x"; }
+
+            log(msg, type = 'info') {
+                const div = document.getElementById('logs');
+                const entry = document.createElement('div');
+                entry.className = `log-entry log-${type}`;
+                entry.innerText = `> ${msg}`;
+                div.prepend(entry);
+            }
+
+            initWorld() {
+                const h = this.canvas.height; const cy = h / 2;
+                // Initial Setup
+                this.nodes.push(new Node('ui', 'UI', 50, cy, 'ui'));
+                this.nodes.push(new Node('db_api', 'API DB', 400, cy + 150, 'db'));
+                this.nodes.push(new Node('lb', 'LB', 550, cy, 'lb'));
+                this.nodes.push(new Node('db_gw', 'Gateway DB', 850, cy + 150, 'db'));
+
+                const dbApi = this.nodes.find(n => n.id === 'db_api');
+                const dbGw = this.nodes.find(n => n.id === 'db_gw');
+                dbApi.dbText = "UNDEPLOYED"; dbGw.dbText = "UNDEPLOYED";
+
+                // Add initial servers/gateways
+                this.addServer(); this.addServer();
+                this.addGateway(); this.addGateway();
+
+                this.updateApiUi();
+            }
+
+            addServer() {
+                const count = this.nodes.filter(n => n.type === 'server').length + 1;
+                const id = `s${Date.now()}`; // Unique ID
+                const label = `API-0${count}`;
+                const n = new Node(id, label, 250, 0, 'server'); // Y set by layout
+                this.nodes.push(n);
+
+                const dbApi = this.nodes.find(n => n.id === 'db_api');
+                const lb = this.nodes.find(n => n.id === 'lb');
+                this.addLink(n, dbApi);
+                this.addLink(n, lb);
+
+                // Logical links to ALL gateways
+                this.nodes.filter(g => g.type === 'gateway').forEach(g => this.addLink(g, n));
+
+                this.layoutNodes('server', 250);
+            }
+
+            removeServer() {
+                const servers = this.nodes.filter(n => n.type === 'server');
+                if (servers.length <= 1) return; // Keep at least one
+                const target = servers[servers.length - 1];
+                this.removeNode(target);
+                this.layoutNodes('server', 250);
+            }
+
+            addGateway() {
+                const count = this.nodes.filter(n => n.type === 'gateway').length + 1;
+                const id = `g${Date.now()}`;
+                const label = `GW-0${count}`;
+                const n = new Node(id, label, 700, 0, 'gateway');
+                this.nodes.push(n);
+
+                const dbGw = this.nodes.find(n => n.id === 'db_gw');
+                const lb = this.nodes.find(n => n.id === 'lb');
+                this.addLink(lb, n);
+                this.addLink(n, dbGw);
+
+                // Logical links to ALL servers
+                this.nodes.filter(s => s.type === 'server').forEach(s => this.addLink(n, s));
+
+                this.layoutNodes('gateway', 700);
+            }
+
+            removeGateway() {
+                const gateways = this.nodes.filter(n => n.type === 'gateway');
+                if (gateways.length <= 1) return;
+                const target = gateways[gateways.length - 1];
+                this.removeNode(target);
+                this.layoutNodes('gateway', 700);
+            }
+
+            removeNode(node) {
+                this.nodes = this.nodes.filter(n => n !== node);
+                this.links = this.links.filter(l => l.from !== node && l.to !== node);
+            }
+
+            layoutNodes(type, x) {
+                const nodes = this.nodes.filter(n => n.type === type);
+                const cy = this.canvas.height / 2;
+                const gap = 120; // Spacing
+                const totalHeight = (nodes.length - 1) * gap;
+                let startY = cy - totalHeight / 2;
+
+                nodes.forEach((n, i) => {
+                    n.x = x;
+                    n.y = startY + i * gap;
+                    // n.label = type === 'server' ? `API-0${i+1}` : `GW-0${i+1}`; // Optional: Renumber logic? No, keep constant IDs for visual stability
+                });
+            }
+
+            addLink(n1, n2) { this.links.push({ from: n1, to: n2, cut: false }); }
+            getLink(n1, n2) { return this.links.find(l => (l.from === n1 && l.to === n2) || (l.from === n2 && l.to === n1)); }
+
+            loop() {
+                this.update();
+                this.draw();
+                requestAnimationFrame(() => this.loop());
+            }
+
+            update() {
+                const dt = this.speedFactor;
+                const db = this.nodes.find(n => n.id === 'db_api');
+
+                if (this.dbState.lockedBy) {
+                    db.leaseTime -= (1 / 60) * dt;
+                    if (db.leaseTime <= 0) {
+                        this.log("⚠️ DB Lease Expired! Triggering Recovery...", "warn");
+                        // Demote old leader
+                        const oldLeader = this.nodes.find(n => n.id === this.dbState.lockedBy);
+                        if (oldLeader && oldLeader.state === 'leader') oldLeader.state = 'idle';
+
+                        this.dbState.lockedBy = null;
+                        db.leaseTime = 0;
+                        this.startRecoveryRace();
+                    }
+                }
+
+                this.nodes.forEach(n => n.update(dt));
+                this.packets = this.packets.filter(p => !p.isDead);
+                this.packets.forEach(p => p.update(dt, this));
+                this.particles = this.particles.filter(p => p.life > 0);
+                this.particles.forEach(p => p.update());
+                this.ripples = this.ripples.filter(r => r.alpha > 0);
+                this.ripples.forEach(r => r.update());
+                this.pipes = this.pipes.filter(pipe => pipe.update(dt)); // Update and remove broken pipes
+            }
+
+            draw() {
+                this.ctx.fillStyle = COLORS.bg;
+                this.ctx.fillRect(0, 0, this.canvas.width, this.canvas.height);
+
+                this.ctx.lineWidth = 2;
+                this.links.forEach(l => {
+                    if (l.from.type === 'gateway' && l.to.type === 'server') return;
+                    this.ctx.strokeStyle = l.cut ? COLORS.lineCut : COLORS.line;
+                    if (l.cut) this.ctx.setLineDash([5, 5]); else this.ctx.setLineDash([]);
+                    this.ctx.beginPath(); this.ctx.moveTo(l.from.x, l.from.y); this.ctx.lineTo(l.to.x, l.to.y); this.ctx.stroke();
+                });
+                this.ctx.setLineDash([]);
+
+                this.nodes.forEach(n => n.draw(this.ctx));
+                this.pipes.forEach(p => p.draw(this.ctx)); // Draw Pipes
+                this.packets.forEach(p => p.draw(this.ctx));
+                this.particles.forEach(p => p.draw(this.ctx));
+                this.ripples.forEach(r => r.draw(this.ctx));
+            }
+
+            // --- WORKFLOW ---
+
+            createRequest(action) {
+                this.apiRequests++;
+                this.log(`USER: Requesting ${action.toUpperCase()}...`);
+                const servers = this.nodes.filter(n => n.type === 'server' && n.state !== 'dead');
+                if (servers.length === 0) { this.log("All servers DEAD.", "error"); return; }
+
+                const target = servers[Math.floor(Math.random() * servers.length)];
+                this.spawnPacket(this.nodes[0], target, 'REQ', COLORS.packet, (sim) => sim.handleServerRequest(target, action));
+            }
+
+            handleServerRequest(server, action) {
+                if (server.state === 'dead') return;
+                const db = this.nodes.find(n => n.id === 'db_api');
+
+                this.spawnPacket(server, db, 'CHECK', COLORS.server, (sim) => {
+                    const current = sim.dbState.status;
+                    const isIntermediate = ['deploying', 'undeploying', 'updating'].includes(current);
+
+                    if (isIntermediate) {
+                        // VISUAL REJECTION ON DB
+                        sim.spawnLockWave(db.x, db.y);
+
+                        sim.spawnPacket(db, server, 'REJECT', COLORS.lineCut, (s) => {
+                            const status = s.dbState.status.toUpperCase();
+                            s.log(`⛔ Request DISCARDED [${server.label}]: System is ${status}`, "error");
+                            const trash = new Packet(server, server, 'TRASH', 'red', null);
+                            trash.makeTrash();
+                            s.packets.push(trash);
+                        });
+                    } else {
+                        let newState = '';
+                        if (action === 'deploy') newState = 'deploying';
+                        if (action === 'undeploy') newState = 'undeploying';
+                        if (action === 'update') newState = 'updating';
+
+                        sim.dbState.status = newState;
+                        db.dbText = newState.toUpperCase();
+
+                        sim.spawnPacket(db, server, 'ACK', COLORS.success, (s) => {
+                            s.updateApiUi();
+                            s.triggerLeaderElection();
+                        });
+                    }
+                });
+            }
+
+            triggerLeaderElection() {
+                const db = this.nodes.find(n => n.id === 'db_api');
+                const servers = this.nodes.filter(n => n.type === 'server' && n.state !== 'dead');
+
+                // Clear old pipes on new election
+                // Clear old pipes on new election
+                // this.pipes = [];
+
+                servers.forEach(s => {
+                    this.spawnPacket(db, s, 'EVENT', '#bf00ff', (sim) => {
+                        // START PROBE
+                        sim.sendProbe(s, db);
+                    });
+                });
+            }
+
+            startRecoveryRace() {
+                const db = this.nodes.find(n => n.id === 'db_api');
+                const servers = this.nodes.filter(n => n.type === 'server' && n.state !== 'dead');
+
+                if (servers.length === 0) {
+                    this.log("Recovery Failed: No alive servers.", "error");
+                    return;
+                }
+                this.log(`Cluster: Racing for Lock...`, "info");
+                servers.forEach(s => {
+                    // START PROBE (Recovery)
+                    this.sendProbe(s, db);
+                });
+            }
+
+            // --- PROBE LOGIC ---
+            sendProbe(server, db) {
+                const lb = this.nodes.find(n => n.id === 'lb');
+                // 1. Send Probe to LB
+                this.spawnPacket(server, lb, 'PROBE', COLORS.probe, (sim) => {
+                    // 2. Probe Reached LB -> Bounce Back to Server
+                    // (In real probe, it checks gateways too, but hitting LB is the physical check here)
+                    sim.spawnPacket(lb, server, 'PROBE_ACK', COLORS.probe, (sim) => {
+                        // 3. Probe Successful -> Send LOCK to DB
+                        sim.spawnPacket(server, db, 'LOCK', COLORS.lock, (sim) => sim.handleLockAttempt(server));
+                    });
+                });
+            }
+
+            handleLockAttempt(server) {
+                const db = this.nodes.find(n => n.id === 'db_api');
+                if (this.dbState.lockedBy == null) {
+                    this.dbState.lockedBy = server.id;
+                    db.leaseTime = 1200;
+                    this.log(`Lock Granted: ${server.label}`, "success");
+
+                    // Safety: Ensure no one else thinks they are leader
+                    this.nodes.forEach(n => {
+                        if (n.type === 'server' && n.id !== server.id && n.state === 'leader') {
+                            n.state = 'idle';
+                        }
+                    });
+
+                    this.spawnPacket(db, server, 'OK', COLORS.lock, (sim) => {
+                        server.state = 'leader';
+                        sim.startGatewaySync(server);
+                    });
+                } else {
+                    this.spawnPacket(db, server, 'FAIL', '#555', () => { });
+                }
+            }
+
+            startGatewaySync(leader) {
+                const lb = this.nodes.find(n => n.id === 'lb');
+
+                this.spawnPacket(leader, lb, 'SYNC', COLORS.lineActive, (sim) => {
+                    if (leader.state === 'dead') return;
+                    const reachableGateways = sim.nodes.filter(n => {
+                        if (n.type !== 'gateway' || n.state === 'dead') return false;
+                        const link = sim.getLink(lb, n);
+                        return link && !link.cut;
+                    });
+
+                    if (reachableGateways.length === 0) {
+                        sim.log("LB Panic: Network Isolation! No Gateways reachable.", "error");
+                        sim.spawnExplosion(lb.x, lb.y, 'red');
+                        return;
+                    }
+
+                    if (reachableGateways.length < sim.nodes.filter(n => n.type === 'gateway').length) {
+                        sim.log(`LB Warning: Rerouting traffic (Links Down)`, "warn");
+                    }
+
+                    const targetGw = reachableGateways[Math.floor(Math.random() * reachableGateways.length)];
+
+                    sim.spawnPacket(lb, targetGw, 'FWD', COLORS.lineActive, (sim) => {
+                        sim.log(`${targetGw.label}: Connected to Leader`, 'success');
+                        sim.addPipe(leader, targetGw); // PIPE START
+
+                        const failCb = (sim) => {
+                            sim.removePipe(leader, targetGw);
+                            sim.log(`🔌 Connection Broken (Handshake Failed)`, 'warn');
+                        };
+
+                        sim.spawnPacket(targetGw, leader, 'FETCH', '#f0f', (sim) => {
+                            if (leader.state === 'dead') { failCb(sim); return; }
+                            const db = sim.nodes.find(n => n.id === 'db_api');
+                            sim.spawnPacket(leader, db, 'READ', '#f0f', (sim) => {
+                                if (leader.state === 'dead') { failCb(sim); return; }
+                                sim.spawnPacket(db, leader, 'DATA', '#f0f', (sim) => {
+                                    if (leader.state === 'dead') { failCb(sim); return; }
+                                    const isUndeploy = sim.dbState.status === 'undeploying';
+                                    sim.spawnPacket(leader, targetGw, 'CFG', '#f0f', (sim) => {
+
+                                        const gwDb = sim.nodes.find(n => n.id === 'db_gw');
+                                        sim.spawnPacket(targetGw, gwDb, 'WRITE', COLORS.success, (sim) => {
+                                            sim.gwDbState.status = sim.dbState.status === 'undeploying' ? 'undeployed' : 'deployed';
+                                            gwDb.dbText = sim.gwDbState.status.toUpperCase();
+                                            sim.spawnPacket(gwDb, targetGw, 'ACK', COLORS.success, (sim) => {
+                                                sim.spawnPacket(targetGw, leader, 'DONE', COLORS.success, (sim) => {
+                                                    sim.removePipe(leader, targetGw); // PIPE END
+                                                    if (isUndeploy) sim.log(`🔌 Connection Closed.`, 'warn');
+                                                    sim.finalizeState(leader);
+                                                }, failCb);
+                                            }, failCb);
+                                        }, failCb);
+                                    }, failCb);
+                                }, failCb);
+                            }, failCb);
+                        }, failCb);
+                    });
+                });
+            }
+
+            finalizeState(leader) {
+                if (leader.state === 'dead') return;
+                const db = this.nodes.find(n => n.id === 'db_api');
+                this.spawnPacket(leader, db, 'FIN', COLORS.success, (sim) => {
+                    if (sim.dbState.status === 'deploying' || sim.dbState.status === 'updating') sim.dbState.status = 'deployed';
+                    if (sim.dbState.status === 'undeploying') sim.dbState.status = 'undeployed';
+
+                    sim.dbState.lockedBy = null;
+                    db.leaseTime = 0;
+                    db.dbText = sim.dbState.status.toUpperCase();
+
+                    leader.state = 'idle';
+                    sim.updateApiUi();
+                    sim.log(`State Settled: ${sim.dbState.status.toUpperCase()}`, "success");
+                });
+            }
+
+            // --- INTERACTION ---
+            handleClick(e) {
+                const rect = this.canvas.getBoundingClientRect();
+                const m = { x: e.clientX - rect.left, y: e.clientY - rect.top };
+                for (let l of this.links) {
+                    if (this.distToSegment(m, l.from, l.to) < 10) {
+                        l.cut = !l.cut;
+                        this.spawnExplosion(m.x, m.y, COLORS.lineCut);
+                        this.log(l.cut ? "Link Cut!" : "Link Repaired", "warn");
+                        return;
+                    }
+                }
+            }
+
+            handleRightClick(e) {
+                const rect = this.canvas.getBoundingClientRect();
+                const m = { x: e.clientX - rect.left, y: e.clientY - rect.top };
+                for (let n of this.nodes) {
+                    if (Dist(m, n) < n.radius) {
+                        n.state = n.state === 'dead' ? 'idle' : 'dead';
+                        this.log(`${n.label} ${n.state === 'dead' ? 'CRASHED' : 'REBOOTED'}`, "error");
+                        this.spawnExplosion(n.x, n.y, 'red');
+                        return;
+                    }
+                }
+            }
+
+            spawnPacket(f, t, type, c, cb, failCb) { this.packets.push(new Packet(f, t, type, c, cb, failCb)); }
+            spawnExplosion(x, y, c) { for (let i = 0; i < 8; i++) this.particles.push(new Particle(x, y, c, { x: (Math.random() - 0.5) * 5, y: (Math.random() - 0.5) * 5 })); }
+            spawnLockWave(x, y) { this.ripples.push(new Ripple(x, y, '#ff3333')); }
+            addPipe(n1, n2) { if (!this.pipes.find(p => (p.n1 === n1 && p.n2 === n2) || (p.n1 === n2 && p.n2 === n1))) this.pipes.push(new Pipe(n1, n2)); }
+            removePipe(n1, n2) { this.pipes = this.pipes.filter(p => !((p.n1 === n1 && p.n2 === n2) || (p.n1 === n2 && p.n2 === n1))); }
+            distToSegment(p, v, w) {
+                const l2 = Math.pow(Dist(v, w), 2);
+                if (l2 === 0) return Dist(p, v);
+                let t = ((p.x - v.x) * (w.x - v.x) + (p.y - v.y) * (w.y - v.y)) / l2;
+                t = Math.max(0, Math.min(1, t));
+                return Dist(p, { x: v.x + t * (w.x - v.x), y: v.y + t * (w.y - v.y) });
+            }
+
+            updateApiUi() {
+                const container = document.getElementById('api-card-container');
+                const s = this.dbState.status;
+                let color = '#555';
+                if (s === 'deployed') color = '#2ecc71';
+                else if (s.includes('ing')) color = '#f1c40f';
+                let buttons = '';
+                if (s === 'undeployed') {
+                    buttons = `<button class="deploy" onclick="sim.createRequest('deploy')">Deploy</button>`;
+                } else if (s === 'deployed') {
+                    buttons = `
+                <div class="btn-group">
+                    <button class="update" onclick="sim.createRequest('update')">Update</button>
+                    <button class="undeploy" onclick="sim.createRequest('undeploy')">Undeploy</button>
+                </div>`;
+                } else {
+                    buttons = `<button disabled>Processing...</button>`;
+                }
+                container.innerHTML = `
+            <div style="background:#222; padding:15px; border-radius:6px; border-left:4px solid ${color}; color:white;">
+                <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:10px;">
+                    <span style="font-weight:bold; font-size:1.1em;">Payment Service</span>
+                    <span style="font-size:10px; background:${color}33; color:${color}; padding:3px 6px; border-radius:3px; border:1px solid ${color}">${s.toUpperCase()}</span>
+                </div>
+                ${buttons}
+            </div>
+        `;
+            }
+        }
+
+        const sim = new Simulation();
+    </script>
+</body>
+
+</html>
