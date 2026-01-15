@@ -193,7 +193,13 @@
                 1. <b>Left Click</b> the line between API-02 and LB.<br>
                 2. <b>Right Click</b> the current Leader (API-01) to KILL it.<br>
                 3. Watch API-02's blue probe hit the cut and fail.<br>
-                4. API-03's probe succeeds -> Sends Orange Lock -> Wins.
+                4. API-03's probe succeeds -> Sends Orange Lock -> Wins.<br>
+                <hr style="border:0; border-top:1px solid #333; margin:10px 0;">
+                <b>Navigation:</b><br>
+                • <b>Scroll</b> to Zoom In/Out<br>
+                • <b>Shift + Left Click</b> to Pan<br>
+                <button onclick="sim.resetView()" style="margin-top:10px; font-size:0.8rem; padding:4px;">Reset
+                    View</button>
             </div>
 
             <h3>Cluster Scaling</h3>
@@ -240,6 +246,7 @@
             packet: '#fff',
             probe: '#00ffff', // Cyan for Probe
             lock: '#f1c40f',
+            failed: '#ff3333',
             dead: '#333'
         };
 
@@ -320,7 +327,7 @@
                     this.pos.y += this.trashVelocity.y * dt;
                     this.trashVelocity.y += 0.8 * dt; // Heavier gravity
                     this.angle += this.spin; // SPIN
-                    if (this.pos.y > window.innerHeight + 50) this.isDead = true;
+                    if (this.pos.y > sim.height + 50) this.isDead = true;
                     return;
                 }
 
@@ -465,6 +472,17 @@
                 this.ripples = []; // NEW
                 this.pipes = []; // WS Pipes
                 this.speedFactor = 1.0;
+                this.width = window.innerWidth;
+                this.height = window.innerHeight;
+
+                // CAMERA STATE
+                this.view = { x: 0, y: 0, zoom: 1 };
+                this.isPanning = false;
+                this.lastMouse = { x: 0, y: 0 };
+
+                this.operationRetries = 0;
+                this.maxRetries = 3;
+                this.lastFailedLeaderId = null;
 
                 this.dbState = { status: 'undeployed', lockedBy: null };
                 this.gwDbState = { status: 'undeployed' };
@@ -475,12 +493,74 @@
                 window.addEventListener('resize', () => this.resize());
                 this.canvas.addEventListener('mousedown', e => this.handleClick(e));
                 this.canvas.addEventListener('contextmenu', e => { e.preventDefault(); this.handleRightClick(e); });
+                this.canvas.addEventListener('wheel', e => this.handleWheel(e), { passive: false });
+                this.canvas.addEventListener('mousemove', e => this.handleMouseMove(e));
+                this.canvas.addEventListener('mouseup', () => this.isPanning = false);
 
                 this.initWorld();
                 this.loop();
             }
 
-            resize() { this.canvas.width = window.innerWidth; this.canvas.height = window.innerHeight; }
+            resize() {
+                const dpr = window.devicePixelRatio || 1;
+                const width = window.innerWidth;
+                const height = window.innerHeight;
+
+                this.width = width;
+                this.height = height;
+
+                this.canvas.width = width * dpr;
+                this.canvas.height = height * dpr;
+                this.canvas.style.width = `${width}px`;
+                this.canvas.style.height = `${height}px`;
+
+                this.ctx.scale(dpr, dpr);
+            }
+
+            resetView() {
+                this.view = { x: 0, y: 0, zoom: 1 };
+                this.log("View Reset", "info");
+            }
+
+            handleWheel(e) {
+                e.preventDefault();
+                const zoomSpeed = 0.001;
+                const delta = -e.deltaY;
+                const factor = Math.pow(1.1, delta / 100);
+
+                const rect = this.canvas.getBoundingClientRect();
+                const mx = e.clientX - rect.left;
+                const my = e.clientY - rect.top;
+
+                const worldX = (mx - this.view.x) / this.view.zoom;
+                const worldY = (my - this.view.y) / this.view.zoom;
+
+                const newZoom = Math.min(Math.max(this.view.zoom * factor, 0.2), 5);
+
+                this.view.zoom = newZoom;
+                this.view.x = mx - worldX * this.view.zoom;
+                this.view.y = my - worldY * this.view.zoom;
+            }
+
+            handleMouseMove(e) {
+                const rect = this.canvas.getBoundingClientRect();
+                const mx = e.clientX - rect.left;
+                const my = e.clientY - rect.top;
+
+                if (this.isPanning) {
+                    this.view.x += mx - this.lastMouse.x;
+                    this.view.y += my - this.lastMouse.y;
+                }
+                this.lastMouse = { x: mx, y: my };
+            }
+
+            screenToWorld(mx, my) {
+                return {
+                    x: (mx - this.view.x) / this.view.zoom,
+                    y: (my - this.view.y) / this.view.zoom
+                };
+            }
+
             setSpeed(val) { this.speedFactor = parseFloat(val); document.getElementById('speed-val').innerText = val + "x"; }
 
             log(msg, type = 'info') {
@@ -492,7 +572,7 @@
             }
 
             initWorld() {
-                const h = this.canvas.height; const cy = h / 2;
+                const h = this.height; const cy = h / 2;
                 // Initial Setup
                 this.nodes.push(new Node('ui', 'UI', 50, cy, 'ui'));
                 this.nodes.push(new Node('db_api', 'API DB', 400, cy + 150, 'db'));
@@ -569,7 +649,7 @@
 
             layoutNodes(type, x) {
                 const nodes = this.nodes.filter(n => n.type === type);
-                const cy = this.canvas.height / 2;
+                const cy = this.height / 2;
                 const gap = 120; // Spacing
                 const totalHeight = (nodes.length - 1) * gap;
                 let startY = cy - totalHeight / 2;
@@ -620,7 +700,11 @@
 
             draw() {
                 this.ctx.fillStyle = COLORS.bg;
-                this.ctx.fillRect(0, 0, this.canvas.width, this.canvas.height);
+                this.ctx.fillRect(0, 0, this.width, this.height);
+
+                this.ctx.save();
+                this.ctx.translate(this.view.x, this.view.y);
+                this.ctx.scale(this.view.zoom, this.view.zoom);
 
                 this.ctx.lineWidth = 2;
                 this.links.forEach(l => {
@@ -636,12 +720,15 @@
                 this.packets.forEach(p => p.draw(this.ctx));
                 this.particles.forEach(p => p.draw(this.ctx));
                 this.ripples.forEach(r => r.draw(this.ctx));
+
+                this.ctx.restore();
             }
 
             // --- WORKFLOW ---
 
             createRequest(action) {
                 this.apiRequests++;
+                this.lastFailedLeaderId = null; // Clean slate for new user action
                 this.log(`USER: Requesting ${action.toUpperCase()}...`);
                 const servers = this.nodes.filter(n => n.type === 'server' && n.state !== 'dead');
                 if (servers.length === 0) { this.log("All servers DEAD.", "error"); return; }
@@ -696,8 +783,18 @@
 
                 servers.forEach(s => {
                     this.spawnPacket(db, s, 'EVENT', '#bf00ff', (sim) => {
-                        // START PROBE
-                        sim.sendProbe(s, db);
+                        // RANDOMIZED BACKOFF + PENALTY logic
+                        let delay = 100 + Math.random() * 700;
+                        if (s.id === this.lastFailedLeaderId) {
+                            delay += 1500;
+                            sim.log(`${s.label}: Penalty Backoff applied.`, 'warn');
+                        }
+
+                        setTimeout(() => {
+                            if (s.state !== 'dead' && !this.dbState.lockedBy) {
+                                sim.spawnPacket(s, db, 'LOCK', COLORS.lock, (sim) => sim.handleLockAttempt(s));
+                            }
+                        }, delay / this.speedFactor);
                     });
                 });
             }
@@ -712,23 +809,68 @@
                 }
                 this.log(`Cluster: Racing for Lock...`, "info");
                 servers.forEach(s => {
-                    // START PROBE (Recovery)
-                    this.sendProbe(s, db);
+                    // RANDOMIZED BACKOFF + PENALTY logic
+                    let delay = 100 + Math.random() * 700;
+                    if (s.id === this.lastFailedLeaderId) {
+                        delay += 1500;
+                        this.log(`${s.label}: Penalty Backoff applied.`, 'warn');
+                    }
+
+                    setTimeout(() => {
+                        if (s.state !== 'dead' && !this.dbState.lockedBy) {
+                            this.spawnPacket(s, db, 'LOCK', COLORS.lock, (sim) => sim.handleLockAttempt(s));
+                        }
+                    }, delay / this.speedFactor);
                 });
             }
 
             // --- PROBE LOGIC ---
             sendProbe(server, db) {
                 const lb = this.nodes.find(n => n.id === 'lb');
+                this.log(`Leader ${server.label}: Probing Infrastructure...`, 'info');
+
                 // 1. Send Probe to LB
-                this.spawnPacket(server, lb, 'PROBE', COLORS.probe, (sim) => {
-                    // 2. Probe Reached LB -> Bounce Back to Server
-                    // (In real probe, it checks gateways too, but hitting LB is the physical check here)
-                    sim.spawnPacket(lb, server, 'PROBE_ACK', COLORS.probe, (sim) => {
-                        // 3. Probe Successful -> Send LOCK to DB
-                        sim.spawnPacket(server, db, 'LOCK', COLORS.lock, (sim) => sim.handleLockAttempt(server));
-                    });
-                });
+                this.spawnPacket(server, lb, 'PROBE', COLORS.probe,
+                    (sim) => {
+                        // 2. Probe Reached LB -> Bounce Back to Server
+                        sim.spawnPacket(lb, server, 'PROBE_ACK', COLORS.probe, (sim) => {
+                            // 3. Probe Successful -> Proceed to Sync
+                            sim.log(`Infrastructure Ready. Starting Sync.`, 'success');
+                            sim.startGatewaySync(server);
+                        });
+                    },
+                    (sim) => {
+                        // PROBE FAILED (Physical Link Cut or LB Dead)
+                        sim.handleProbeFail(server);
+                    }
+                );
+            }
+
+            handleProbeFail(leader) {
+                this.operationRetries++;
+                const db = this.nodes.find(n => n.id === 'db_api');
+
+                if (this.operationRetries >= this.maxRetries) {
+                    const current = this.dbState.status;
+                    const failed = current.endsWith('ing') ? current.replace('ing', '_failed') : 'operation_failed';
+
+                    this.dbState.status = failed;
+                    db.dbText = failed.toUpperCase();
+                    this.log(`Terminal Failure: ${failed.toUpperCase()}. Infrastructure Unreachable.`, 'error');
+
+                    this.lastFailedLeaderId = leader.id; // Penalize this leader for next race
+                    leader.state = 'idle';
+                    this.dbState.lockedBy = null;
+                    db.leaseTime = 0;
+                    this.updateApiUi();
+                } else {
+                    this.log(`Probe Failed. Retrying in 2s (${this.operationRetries}/${this.maxRetries})...`, 'warn');
+                    setTimeout(() => {
+                        if (leader.state === 'leader' && this.dbState.lockedBy === leader.id) {
+                            this.sendProbe(leader, db);
+                        }
+                    }, 2000 / this.speedFactor);
+                }
             }
 
             handleLockAttempt(server) {
@@ -737,6 +879,7 @@
                     this.dbState.lockedBy = server.id;
                     db.leaseTime = 1200;
                     this.log(`Lock Granted: ${server.label}`, "success");
+                    this.operationRetries = 0; // Reset retries for new leader
 
                     // Safety: Ensure no one else thinks they are leader
                     this.nodes.forEach(n => {
@@ -747,7 +890,7 @@
 
                     this.spawnPacket(db, server, 'OK', COLORS.lock, (sim) => {
                         server.state = 'leader';
-                        sim.startGatewaySync(server);
+                        sim.sendProbe(server, db); // START PROBE AS LEADER
                     });
                 } else {
                     this.spawnPacket(db, server, 'FAIL', '#555', () => { });
@@ -835,8 +978,13 @@
 
             // --- INTERACTION ---
             handleClick(e) {
+                if (e.button === 1 || (e.button === 0 && e.shiftKey)) {
+                    this.isPanning = true;
+                    return;
+                }
                 const rect = this.canvas.getBoundingClientRect();
-                const m = { x: e.clientX - rect.left, y: e.clientY - rect.top };
+                const m_screen = { x: e.clientX - rect.left, y: e.clientY - rect.top };
+                const m = this.screenToWorld(m_screen.x, m_screen.y);
                 for (let l of this.links) {
                     if (this.distToSegment(m, l.from, l.to) < 10) {
                         l.cut = !l.cut;
@@ -849,7 +997,8 @@
 
             handleRightClick(e) {
                 const rect = this.canvas.getBoundingClientRect();
-                const m = { x: e.clientX - rect.left, y: e.clientY - rect.top };
+                const m_screen = { x: e.clientX - rect.left, y: e.clientY - rect.top };
+                const m = this.screenToWorld(m_screen.x, m_screen.y);
                 for (let n of this.nodes) {
                     if (Dist(m, n) < n.radius) {
                         n.state = n.state === 'dead' ? 'idle' : 'dead';
@@ -879,6 +1028,8 @@
                 let color = '#555';
                 if (s === 'deployed') color = '#2ecc71';
                 else if (s.includes('ing')) color = '#f1c40f';
+                else if (s.includes('failed')) color = '#e74c3c';
+
                 let buttons = '';
                 if (s === 'undeployed') {
                     buttons = `<button class="deploy" onclick="sim.createRequest('deploy')">Deploy</button>`;
@@ -888,6 +1039,9 @@
                     <button class="update" onclick="sim.createRequest('update')">Update</button>
                     <button class="undeploy" onclick="sim.createRequest('undeploy')">Undeploy</button>
                 </div>`;
+                } else if (s.includes('failed')) {
+                    const action = s.split('_')[0];
+                    buttons = `<button class="update" onclick="sim.createRequest('${action}')">Retry ${action.charAt(0).toUpperCase() + action.slice(1)}</button>`;
                 } else {
                     buttons = `<button disabled>Processing...</button>`;
                 }
@@ -895,7 +1049,7 @@
             <div style="background:#222; padding:15px; border-radius:6px; border-left:4px solid ${color}; color:white;">
                 <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:10px;">
                     <span style="font-weight:bold; font-size:1.1em;">Payment Service</span>
-                    <span style="font-size:10px; background:${color}33; color:${color}; padding:3px 6px; border-radius:3px; border:1px solid ${color}">${s.toUpperCase()}</span>
+                    <span style="font-size:10px; background:${color}33; color:${color}; padding:3px 6px; border-radius:3px; border:1px solid ${color}">${s.toUpperCase().replace('_', ' ')}</span>
                 </div>
                 ${buttons}
             </div>
