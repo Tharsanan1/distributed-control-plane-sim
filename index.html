@@ -488,6 +488,7 @@
                 this.gwDbState = { status: 'undeployed' };
 
                 this.apiRequests = 0;
+                this.lbRoundRobinIndex = 0; // For round-robin gateway selection
 
                 this.resize();
                 window.addEventListener('resize', () => this.resize());
@@ -673,6 +674,14 @@
             update() {
                 const dt = this.speedFactor;
                 const db = this.nodes.find(n => n.id === 'db_api');
+
+                // Safety: Ensure only the current lock holder can have 'leader' state
+                // This catches any edge cases where leader badge wasn't properly removed
+                this.nodes.forEach(n => {
+                    if (n.type === 'server' && n.state === 'leader' && n.id !== this.dbState.lockedBy) {
+                        n.state = 'idle';
+                    }
+                });
 
                 if (this.dbState.lockedBy) {
                     db.leaseTime -= (1 / 60) * dt;
@@ -881,14 +890,14 @@
                     this.log(`Lock Granted: ${server.label}`, "success");
                     this.operationRetries = 0; // Reset retries for new leader
 
-                    // Safety: Ensure no one else thinks they are leader
-                    this.nodes.forEach(n => {
-                        if (n.type === 'server' && n.id !== server.id && n.state === 'leader') {
-                            n.state = 'idle';
-                        }
-                    });
-
                     this.spawnPacket(db, server, 'OK', COLORS.lock, (sim) => {
+                        // Safety: Ensure no one else thinks they are leader
+                        // This MUST happen at the exact moment we set the new leader
+                        sim.nodes.forEach(n => {
+                            if (n.type === 'server' && n.id !== server.id && n.state === 'leader') {
+                                n.state = 'idle';
+                            }
+                        });
                         server.state = 'leader';
                         sim.sendProbe(server, db); // START PROBE AS LEADER
                     });
@@ -918,7 +927,9 @@
                         sim.log(`LB Warning: Rerouting traffic (Links Down)`, "warn");
                     }
 
-                    const targetGw = reachableGateways[Math.floor(Math.random() * reachableGateways.length)];
+                    // Round-robin selection among reachable gateways
+                    const targetGw = reachableGateways[sim.lbRoundRobinIndex % reachableGateways.length];
+                    sim.lbRoundRobinIndex++;
 
                     sim.spawnPacket(lb, targetGw, 'FWD', COLORS.lineActive, (sim) => {
                         sim.log(`${targetGw.label}: Connected to Leader`, 'success');
